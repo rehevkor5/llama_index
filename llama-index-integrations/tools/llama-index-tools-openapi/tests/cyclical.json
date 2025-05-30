@@ -1,0 +1,80 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Cyclical Ref Example API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/self-reference": {
+      "get": {
+        "summary": "Example endpoint with cyclical refs",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SelfReferencingObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tick-tock": {
+      "get": {
+        "summary": "Tick-Tock cyclical refs example",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TickObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SelfReferencingObject": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "child": {
+            "$ref": "#/components/schemas/SelfReferencingObject"
+          }
+        }
+      },
+      "TickObject": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tock": {
+            "$ref": "#/components/schemas/TockObject"
+          }
+        }
+      },
+      "TockObject": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tick": {
+            "$ref": "#/components/schemas/TickObject"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## [0.5.0]
+
+- Allow schema inlining to be disabled, which can reduce the size of the resulting document and
+  avoid problems due to cyclical references
+- Add control over how many times an object can be inlined within its own subtree. This allows for
+  some inlining but falls back on $ref for cyclical things.
+- Add control over max inlined nesting depth, to prevent infinite loops or stack overflows when
+  nesting is very deep, even if cycle limit doesn't prevent it.
+
 ## [0.4.0]
 
 - Allow filtering out operations by id

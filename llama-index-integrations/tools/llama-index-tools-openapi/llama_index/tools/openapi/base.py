@@ -1,12 +1,15 @@
 """OpenAPI Tool."""
 
 import json
+import logging
 from collections import OrderedDict
 from typing import List, Optional, Callable
 
 import requests
 from llama_index.core.schema import Document
 from llama_index.core.tools.tool_spec.base import BaseToolSpec
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAPIToolSpec(BaseToolSpec):
@@ -24,7 +27,25 @@ class OpenAPIToolSpec(BaseToolSpec):
         spec: Optional[dict] = None,
         url: Optional[str] = None,
         operation_id_filter: Callable[[str], bool] = None,
+        inline_schema_refs: bool = True,
+        max_inlined_cycle_depth: int = 1,
+        max_inlined_schema_nest_depth: int = 20,
     ):
+        """
+        Constructs an instance based on either a spec or a url to a spec.
+
+        Args:
+            spec: a spec already parsed into a dict
+            url: a url from which to retrieve the spec
+            operation_id_filter: an optional predicate for filtering specific operation ids
+            inline_schema_refs: set false to disable inlining of $ref, which can reduce the size
+              of the resulting document and avoid problems due to cyclical references
+            max_inlined_cycle_depth: if inlining enabled, controls how many times a ref can be
+              inlined within its own tree
+            max_inlined_schema_nest_depth: if inlining enabled, prevents cycles of $ref from causing
+              infinite loops or stack overflows
+
+        """
         import yaml
 
         if spec and url:
@@ -36,6 +57,10 @@ class OpenAPIToolSpec(BaseToolSpec):
             spec = yaml.safe_load(response)
         else:
             raise ValueError("You must provide a url or OpenAPI spec as a dict")
+
+        self.inline_schema_refs = inline_schema_refs
+        self.max_inlined_cycle_depth = max_inlined_cycle_depth
+        self.max_inlined_schema_nest_depth = max_inlined_schema_nest_depth
 
         # TODO: if we retrieved spec from URL, the server URL inside the spec may be relative to
         #  the retrieval URL.
@@ -89,8 +114,9 @@ class OpenAPIToolSpec(BaseToolSpec):
                 reduced["responses"] = details["responses"]["200"]
             return reduced
 
-        def dereference_openapi(openapi_doc):
-            """Dereferences a Swagger/OpenAPI document by resolving all $ref pointers."""
+        preserve_refs = set()
+        def inline_refs(openapi_doc):
+            """Inlines all $ref pointers in a Swagger/OpenAPI document."""
             try:
                 import jsonschema
             except ImportError:
@@ -100,21 +126,41 @@ class OpenAPIToolSpec(BaseToolSpec):
                 )
 
             resolver = jsonschema.RefResolver.from_schema(openapi_doc)
-
+            ref_stack = []
             def _dereference(obj):
+                ref_depth = len(ref_stack)
+                if ref_depth > self.max_inlined_schema_nest_depth:
+                    raise RuntimeError(f"Reached maximum depth of nested $ref. "
+                                       f"Ref stack; {ref_stack}")
                 if isinstance(obj, dict):
                     if "$ref" in obj:
-                        with resolver.resolving(obj["$ref"]) as resolved:
-                            return _dereference(resolved)
+                        ref = obj["$ref"]
+                        if ref_stack.count(ref) >= self.max_inlined_cycle_depth:
+                            logger.debug("Reached max cyclical nesting of %s. "
+                                         "Ref stack: %s", ref, ref_stack)
+                            return obj
+                        ref_stack.append(ref)
+                        if ref.startswith("#/components/schemas/"):
+                            schema_name = ref.split("/")[-1]
+                            preserve_refs.add(schema_name)
+                        try:
+                            with resolver.resolving(ref) as resolved:
+                                inlined = _dereference(resolved)
+                        finally:
+                            ref_stack.pop()
+                        return inlined
                     return {k: _dereference(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
+                if isinstance(obj, list):
                     return [_dereference(item) for item in obj]
-                else:
-                    return obj
+                return obj
 
-            return _dereference(openapi_doc)
+            paths = _dereference(openapi_doc["paths"])
+            openapi_doc["paths"] = paths
+            return openapi_doc
 
-        spec = dereference_openapi(spec)
+        if self.inline_schema_refs:
+            spec = inline_refs(spec)
+
         endpoints = []
         for path_template, operations in spec["paths"].items():
             for operation, operation_detail in operations.items():
@@ -129,8 +175,21 @@ class OpenAPIToolSpec(BaseToolSpec):
                         details.update(reduce_details(operation_detail))
                         endpoints.append(details)
 
-        return {
-            "servers": spec["servers"],
+        result = {
             "description": spec["info"].get("description"),
             "endpoints": endpoints,
         }
+        if "servers" in spec:
+            result["servers"] = spec["servers"]
+        if not self.inline_schema_refs:
+            # Some of these may be unreferenced/unnecessary.
+            result["components"] = spec["components"]
+        else:
+            result["components"] = {
+                "schemas": {
+                    name: spec["components"]["schemas"][name]
+                    for name in preserve_refs
+                }
+            }
+
+        return result
